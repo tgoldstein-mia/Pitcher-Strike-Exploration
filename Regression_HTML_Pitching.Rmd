@@ -1,0 +1,162 @@
+---
+title: "Biomechanics Fastball Velocity Analysis Report"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: hide
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.align = 'center')
+library(dplyr)
+library(ggplot2)
+library(rstanarm)
+library(knitr)
+library(DT)
+
+# Load and process data (hidden from report)
+file <- read.csv("~/Desktop/KinaTrax /Thomas_White 2.csv")
+
+# Filter for fastballs with velocity >= 93 mph
+fastballs <- file %>%
+  filter(tmanPitchType %in% c("Four-Seam FB", "Sinker", "Fastball")) %>% 
+  filter(releaseSpeed >= 93)
+
+# Identify all numeric columns 
+numeric_cols <- fastballs %>%
+  select_if(is.numeric) %>%
+  colnames()
+
+# Remove specified columns from analysis
+excluded_cols <- c("releaseSpeed", "id", "gameId", "pitchId", "exitSpeed", "angle", 
+                   "releaseHeight", "batterMlbamPlayerID", "MLBAM_GAME_ID",
+                   "MLBAM_PITCHER_ID", "TIME_PITCH_RELEASE", "IDX_PITCH_RELEASE", 
+                   "TIME_FOOT_STRIKE", "IDX_FOOT_STRIKE", "TIME_SHOULDER_MER", 
+                   "IDX_SHOULDER_MER", "inducedVerticalBreak", "TIME_BTWN_FC_BR")
+
+numeric_cols <- numeric_cols[!numeric_cols %in% excluded_cols]
+```
+
+## Executive Summary
+
+This report analyzes the relationship between various pitching biomechanics and performance metrics with fastball velocity for Thomas White. The analysis focuses on fastballs thrown at 93+ mph and uses Bayesian regression modeling to quantify relationships.
+
+## Individual Metric Analysis
+
+```{r analysis_function, include=FALSE}
+# Function to analyze each metric
+analyze_metric <- function(metric_name) {
+  # Check if this metric has any valid data
+  valid_data <- fastballs %>%
+    filter(!is.na(.data[[metric_name]]) & !is.na(releaseSpeed))
+  
+  if(nrow(valid_data) == 0) {
+    return(list(plot = NULL, r_squared = NA, n_points = 0, message = "No valid data"))
+  }
+  
+  # FILTER USING MAD (Median Absolute Deviation)
+  metric_median <- median(valid_data[[metric_name]], na.rm = TRUE)
+  metric_mad <- mad(valid_data[[metric_name]], na.rm = TRUE)
+  upper_limit <- metric_median + (3 * metric_mad)
+  lower_limit <- metric_median - (3 * metric_mad)
+  
+  valid_data <- valid_data %>%
+    filter(.data[[metric_name]] <= upper_limit & .data[[metric_name]] >= lower_limit)
+  
+  if(nrow(valid_data) < 10) {
+    return(list(plot = NULL, r_squared = NA, n_points = nrow(valid_data), 
+                message = "Insufficient data after outlier removal"))
+  }
+  
+  # Calculate Bayesian R-squared
+  r_squared <- NA
+  tryCatch({
+    suppressMessages({
+      bayes_model <- stan_glm(as.formula(paste(metric_name, "~ releaseSpeed")), 
+                             data = valid_data,
+                             family = gaussian(),
+                             chains = 2,
+                             iter = 1000,
+                             refresh = 0,
+                             seed = 42)
+    })
+    
+    r_squared <- median(bayes_R2(bayes_model))
+    r_squared <- round(r_squared, 3)
+    
+  }, error = function(e) {
+    r_squared <- NA
+  })
+  
+  # Create subtitle
+  if(!is.na(r_squared)) {
+    subtitle_text <- paste("R² =", r_squared, "| n =", nrow(valid_data))
+  } else {
+    subtitle_text <- paste("Model failed | n =", nrow(valid_data))
+  }
+  
+  # Create the scatter plot with regression line
+  p <- ggplot(valid_data, aes(x = .data[[metric_name]], y = releaseSpeed)) +
+    geom_point(alpha = 0.6, size = 1.2, color = "#2E86AB") +
+    geom_smooth(method = "lm", se = TRUE, color = "black", fill = "#F18F01", alpha = 0.3) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 14, face = "bold"),
+      plot.subtitle = element_text(size = 12),
+      axis.title = element_text(size = 11),
+      panel.grid.minor = element_blank()
+    ) +
+    labs(
+      title = paste(metric_name, "vs Velocity"),
+      subtitle = subtitle_text,
+      x = metric_name,
+      y = "Release Speed (mph)"
+    )
+  
+  return(list(plot = p, r_squared = r_squared, n_points = nrow(valid_data), 
+              message = "Success"))
+}
+```
+
+```{r generate_plots, results='asis'}
+# Store results for summary
+results_summary <- data.frame(
+  Metric = character(),
+  R_squared = numeric(),
+  N_points = integer(),
+  Status = character(),
+  stringsAsFactors = FALSE
+)
+
+# Generate plots for each metric
+for(i in 1:length(numeric_cols)) {
+  metric <- numeric_cols[i]
+  
+  cat("\n### ", metric, "\n\n")
+  
+  result <- analyze_metric(metric)
+  
+  # Add to summary
+  results_summary <- rbind(results_summary, data.frame(
+    Metric = metric,
+    R_squared = ifelse(is.na(result$r_squared), 0, result$r_squared),
+    N_points = result$n_points,
+    Status = result$message,
+    stringsAsFactors = FALSE
+  ))
+  
+  if(!is.null(result$plot)) {
+    print(result$plot)
+  } else {
+    cat("*", result$message, "*\n\n")
+  }
+  
+  cat("\n")
+}
+```
+
