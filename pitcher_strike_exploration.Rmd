@@ -1,0 +1,153 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+BAYESIAN REGRESSION on velocity for all metrics from strike 
+```{r}
+library(dplyr)
+library(ggplot2)
+library(rstanarm)
+
+#load file for specific pitcher & clean data
+file <- read.csv("~/Desktop/KinaTrax /Thomas_White 2.csv")
+
+fastballs <- file %>%
+  filter(tmanPitchType %in% c("Four-Seam FB", "Sinker", "Fastball")) %>% 
+  filter(releaseSpeed >= 93) #change hard cut off based on pitcher knowns 
+
+numeric_cols <- fastballs %>%
+  select_if(is.numeric) %>%
+  colnames()
+
+# metrics to exclude from analysis 
+numeric_cols <- numeric_cols[!numeric_cols %in% c("releaseSpeed", "id", "gameId", "pitchId", "exitSpeed", "angle", "releaseHeight", "batterMlbamPlayerID", "MLBAM_GAME_ID","MLBAM_PITCHER_ID", "TIME_PITCH_RELEASE", "IDX_PITCH_RELEASE", "TIME_FOOT_STRIKE", "IDX_FOOT_STRIKE", "TIME_SHOULDER_MER", "IDX_SHOULDER_MER", "inducedVerticalBreak")]
+
+
+# PDF to save all plots
+pdf_file <- paste0("fastball_regression_plots_", file$PITCHER_NAME_FULL[1], ".pdf")
+pdf(pdf_file, width = 10, height = 8)
+
+# ----------- MAD FILTER ON ALL METRICS ----------
+filtered_data <- setNames(vector("list", length(numeric_cols)), numeric_cols)
+
+for (i in seq_along(numeric_cols)) {
+  metric <- numeric_cols[i]
+
+  valid_data <- fastballs %>%
+    dplyr::filter(!is.na(.data[[metric]]), !is.na(releaseSpeed))
+
+  if (nrow(valid_data) == 0) next
+
+  metric_median <- median(valid_data[[metric]], na.rm = TRUE)
+  metric_mad    <- mad(valid_data[[metric]], na.rm = TRUE)
+  if (is.na(metric_mad) || metric_mad == 0) next  # optional safety
+
+  upper_limit <- metric_median + 3 * metric_mad
+  lower_limit <- metric_median - 3 * metric_mad
+
+  valid_data <- valid_data %>%
+    dplyr::filter(.data[[metric]] <= upper_limit,
+                  .data[[metric]] >= lower_limit)
+
+  if (nrow(valid_data) < 10) next
+
+  filtered_data[[metric]] <- valid_data
+}
+
+# ------ RUN BAYES MODEL ON ALL METRICS ------- 
+
+models <- list()
+
+for (metric in names(filtered_data)) {
+  df <- filtered_data[[metric]]
+  if (is.null(df) || nrow(df) < 10) next
+
+  fmla <- reformulate(metric, response = "releaseSpeed")
+  models[[metric]] <- stan_glm(
+    fmla,
+    data = df,
+    family = gaussian(),
+    chains = 2, iter = 1000, refresh = 0, seed = 42
+  )
+}
+
+# PLOT DATA 
+plots <- list()
+
+for (metric in names(models)) {
+  fit <- models[[metric]]
+  if (is.null(fit)) next
+
+  df <- filtered_data[[metric]]
+  if (is.null(df) || nrow(df) < 2) next
+
+  co <- coef(fit)
+  a_hat <- co[1]; b_hat <- co[2]
+
+  p <- ggplot(df, aes(x = .data[[metric]], y = releaseSpeed)) +
+    geom_point(alpha = 0.6, size = 1.2, color = "#2E86AB") +
+    geom_abline(intercept = a_hat, slope = b_hat, color = "black") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 12, face = "bold"),
+      plot.subtitle = element_text(size = 10),
+      axis.title = element_text(size = 10)
+    ) +
+    labs(
+      title = paste(metric, "vs Velocity"),
+      x = metric,
+      y = "Velocity (mph)"
+    )
+
+  plots[[metric]] <- p
+}
+
+# save 
+
+lapply(names(plots), function(m) print(plots[[m]]))
+dev.off()
+
+```
+
+
+METRIC EXPLORATION BY DATE 
+```{r}
+valid_data_formatted <- valid_data %>%
+  mutate(date_formatted = format(as.Date(DATE), "%m-%d"))
+
+ggplot(valid_data_formatted, aes(x = date_formatted, y = STEP_LENGTH)) +
+  geom_boxplot() +
+  geom_jitter()+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Date (MM-DD)", 
+       y = "STEP_LENGTH",
+       title = "STEP_LENGTH Distribution by Date")
+```
+
+
+METRIC EXPLORATION THROUGHOUT OUTINGS
+```{r}
+game <- valid_data %>% 
+  group_by(DATE) %>% 
+  arrange(PITCH_RELEASE_DATETIME) %>%
+  mutate(pitch_number = row_number()) %>%  
+  ungroup() 
+  # filter(MAX_TRUNK_AXIAL_ROT_VEL <= 1000)
+
+p <- ggplot(game, aes(x = pitch_number, y = TRUNK_AXIAL_ROT_AT_FC)) +
+  geom_line(alpha = 0.6, color = "blue") +  
+  geom_point(alpha = 0.4, size = 0.5) +
+  facet_wrap(~ DATE, scales = "free_x") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Pitch Number", 
+       y = "TRUNK_AXIAL_ROT_AT_FC",
+       title = "TRUNK_AXIAL_ROT_AT_FC by Pitch Number for Each Game")
+
+print(p)
+# ggsave("TRUNK_AXIAL_ROT_AT_FC_by_game.pdf", plot = p, 
+#        width = 16, height = 20, device = "pdf")
+```
